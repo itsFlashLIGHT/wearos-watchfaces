@@ -19,16 +19,21 @@ DAYS_RU = ["ВС", "ПН", "ВТ", "СР", "ЧТ", "ПТ", "СБ"]  # [DAY_OF_WE
 
 AVAIL = "[WEATHER.IS_AVAILABLE] == 1"
 COND = "[WEATHER.CONDITION]"
-# Day/night: weather service when available, otherwise 07:00-19:59 is "day".
-IS_DAY = (f"(({AVAIL} && [WEATHER.IS_DAY] == 1) || "
-          f"([WEATHER.IS_AVAILABLE] == 0 && [HOUR_0_23] >= 7 && [HOUR_0_23] < 20))")
-IS_NIGHT = f"({IS_DAY} == 0)"
-# Golden hour: the forecast for the next hour flips day<->night; offline fallback by clock.
+# Day/night and golden hour come from the weather service only while its data is
+# fresh: the watch refreshes weather irregularly, and hours-old data still says
+# "day" long after sunset. Stale or missing data falls back to the clock.
+STALE_MS = 90 * 60 * 1000
+AGE = "([UTC_TIMESTAMP] - [WEATHER.LAST_UPDATED])"
+FRESH = f"({AVAIL} && {AGE} < {STALE_MS})"
+STALE = f"([WEATHER.IS_AVAILABLE] == 0 || {AGE} >= {STALE_MS})"
+IS_NIGHT = (f"(({FRESH} && [WEATHER.IS_DAY] == 0) || "
+            f"({STALE} && ([HOUR_0_23] < 7 || [HOUR_0_23] >= 20)))")
+# Golden hour: the forecast for the next hour flips day<->night; clock fallback 06 / 19.
 NEXT_OK = "[WEATHER.HOURS.1.IS_AVAILABLE] == 1"
-SUNSET = (f"(({AVAIL} && {NEXT_OK} && [WEATHER.IS_DAY] == 1 && [WEATHER.HOURS.1.IS_DAY] == 0) || "
-          f"([WEATHER.IS_AVAILABLE] == 0 && [HOUR_0_23] == 19))")
-SUNRISE = (f"(({AVAIL} && {NEXT_OK} && [WEATHER.IS_DAY] == 0 && [WEATHER.HOURS.1.IS_DAY] == 1) || "
-           f"([WEATHER.IS_AVAILABLE] == 0 && [HOUR_0_23] == 6))")
+SUNSET = (f"(({FRESH} && {NEXT_OK} && [WEATHER.IS_DAY] == 1 && [WEATHER.HOURS.1.IS_DAY] == 0) || "
+          f"({STALE} && [HOUR_0_23] == 19))")
+SUNRISE = (f"(({FRESH} && {NEXT_OK} && [WEATHER.IS_DAY] == 0 && [WEATHER.HOURS.1.IS_DAY] == 1) || "
+           f"({STALE} && [HOUR_0_23] == 6))")
 
 WEATHER_CODES = {
     "storm": [9],
@@ -44,10 +49,6 @@ def is_weather(kind):
     return f"({AVAIL} && ({ors}))"
 
 
-def not_bad_weather():
-    return " && ".join(f"{is_weather(k)} == 0" for k in ("storm", "snow", "rain", "fog"))
-
-
 def background_condition(clouds):
     # Debug: FORCE_SCENE=rain_day ./build.sh install pins one background.
     forced = os.environ.get("FORCE_SCENE")
@@ -61,7 +62,8 @@ def background_condition(clouds):
     cloudy = is_weather("cloudy")
     for phase, expr in (("sunset", SUNSET), ("sunrise", SUNRISE)):
         cases.append((f"cloudy_{phase}", f"{cloudy} && {expr}", f"bg_cloudy_{phase}"))
-        cases.append((f"clear_{phase}", f"{not_bad_weather()} && {expr}", f"bg_clear_{phase}"))
+        # storm/snow/rain/fog already matched above, so no weather check needed
+        cases.append((f"clear_{phase}", expr, f"bg_clear_{phase}"))
     cases.append(("cloudy_night", f"{cloudy} && {IS_NIGHT}", "bg_cloudy_night"))
     cases.append(("cloudy_day", cloudy, "bg_cloudy_day"))
     cases.append(("clear_night", IS_NIGHT, "bg_clear_night"))
@@ -226,6 +228,18 @@ def hearts_block():
     </Group>"""
 
 
+def debug_weather():
+    """DEBUG_WEATHER=1: raw weather values under the date as
+    "<available> <is_day> <condition> <next hour is_day> <night branch>  <minutes since update>"."""
+    if not os.environ.get("DEBUG_WEATHER"):
+        return ""
+    flag = lambda e: f'({e}) ? "1" : "0"'
+    params = [flag("[WEATHER.IS_AVAILABLE] == 1"), flag("[WEATHER.IS_DAY] == 1"),
+              "[WEATHER.CONDITION]", flag("[WEATHER.HOURS.1.IS_DAY] == 1"), flag(IS_NIGHT),
+                        f"floor({AGE} / 60000)"]
+    return text("debug_weather", 2, py(84), SIZE, 27, "sm", 27, "%s %s %s %s %s  %s", params, variant=0)
+
+
 def build(manifest, clouds):
     time_params = ["[HOUR_0_23_Z]", "[MINUTE_Z]"]
     date_params = [day_of_week(), "[DAY_Z]", "[MONTH_Z]"]
@@ -266,6 +280,7 @@ def build(manifest, clouds):
 {text("date_ambient", 2, py(73), SIZE, 27, "sma", 27, "%s %s.%s", date_params, alpha=0, variant=255)}
 
 {mob_block()}
+{debug_weather()}
 
 {hearts_block()}
 
